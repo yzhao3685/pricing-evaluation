@@ -85,6 +85,126 @@ def simulate_MSE(Train_data,weights):
     var = simulated_MSE - biasSq
     return simulated_MSE,biasSq,var
 
+
+def optimize_bound_method(Train_data,Gamma,w0,hat_r_z,hat_r_y,epsilon=0.05):
+    train_size = Train_data.train_size
+    hat_r_z, hat_r_y = truncate_r(Train_data,hat_r_z,hat_r_y)
+    if w0==[]:
+        w0=[1/train_size]*train_size
+    linear_constraint = LinearConstraint([1]*train_size, [1], [1])#weights sum to 1. must impose it. else true bias blows up
+    bounds = Bounds([0.0]*train_size, [np.inf]*train_size)#[1.0]*train_size)
+    res = minimize(optimize_bound_subroutine, w0,args=(epsilon,Train_data,Gamma,hat_r_z,hat_r_y), method='trust-constr', jac=True,tol=0.00001,
+               constraints=[linear_constraint],options={'verbose':0}, bounds=bounds)#default maxIter=1000
+    return res.x
+
+def optimize_bound_subroutine(weights,epsilon,Train_data,Gamma,hat_r_z,hat_r_y,returnDetails=0):
+    train_size,P_train,P_test,G = Train_data.train_size,Train_data.P_train,Train_data.P_test,Train_data.G
+    bw = np.append(weights, -np.ones(train_size)/train_size)
+    Qw = np.diag(np.append(weights*weights,np.zeros(train_size)))
+    vw = np.append(weights*weights*P_train,np.zeros(train_size))
+    r0=np.append(hat_r_z,hat_r_y)
+    #define terms in opti problem
+    obj_linear_term = np.append((2*math.log(1/epsilon))**0.5,G@bw)
+    cons1_quadratic_term = np.zeros((1+2*train_size,1+2*train_size))
+    cons1_quadratic_term[0,0]=1
+    cons1_quadratic_term[1:,1:]=G@Qw@G
+    if min(scipy.linalg.eigh(cons1_quadratic_term,eigvals_only=True)) < 0:#will have zero eigenvalues, which may appear as a very small negative number 
+        cons1_quadratic_term[1:,1:] += np.identity(train_size*2)*0.00000001
+    cons1_linear_term = np.append(0,2*Qw@r0-vw)
+    cons1_constant = vw@r0-r0@Qw@r0
+    cons2_ub = np.append(P_train,P_test)-r0
+    cons3_quadratic_term = np.zeros((1+2*train_size,1+2*train_size))
+    cons3_quadratic_term[1:,1:] = G
+    #throw into solver
+    m = Model()
+    m.Params.LogToConsole = 0#suppress Gurobipy printing
+    talpha=m.addMVar (train_size*2+1, ub=np.inf,lb=-np.inf,name="talpha" )
+    m.setObjective(talpha@obj_linear_term, GRB.MAXIMIZE)
+    m.addConstr(talpha@cons1_quadratic_term@talpha+talpha@cons1_linear_term <= cons1_constant)
+    m.addConstr(talpha@cons3_quadratic_term@talpha <= Gamma**2)
+    m.addConstrs(np.append(0,G[i])@talpha <= cons2_ub[i] for i in range(train_size*2))
+    m.addConstrs(np.append(0,G[i])@talpha >= -r0[i] for i in range(train_size*2))
+    m.params.method=0#0 is primal simplex, 1 is dual simplex, 2 is barrier
+    m.update()
+    m.optimize()
+    #print('status: ',m.status)
+    assert m.status==2 or m.status==13
+    alpha=np.zeros(train_size*2)
+    for i in range(0,train_size*2):
+        alpha[i]=talpha[i+1].x
+    t = talpha[0].x
+    delta=G@alpha
+    #print('t: ',t)
+    #print('delta: ',delta)
+    assert t>0 #otherwise will have division by 0
+    qw = max(np.abs(weights)*P_train)
+    obj_val = (r0+delta)@bw+t*(2*math.log(1/epsilon))**0.5+qw*math.log(1/epsilon)/3
+    #compute grad
+    r_z = hat_r_z+delta[0:train_size]
+    grad_2nd_term= (2*math.log(1/epsilon))**0.5*0.5/t
+    grad_2nd_term = grad_2nd_term*(2*weights*r_z*(P_train-r_z))
+    grad_3rd_term = np.zeros(train_size)
+    largest_index= np.argmax(np.abs(weights)*P_train)
+    grad_3rd_term[largest_index]=P_train[largest_index]#*sign(weights[largest_index])
+    grad_3rd_term = grad_3rd_term*math.log(1/epsilon)/3
+    grad = r_z+grad_2nd_term+grad_3rd_term
+    if returnDetails==0:
+        return obj_val,grad
+    else:
+        wc_var = t**2
+        wc_bias = bw@delta
+        return obj_val,grad,wc_bias,wc_var
+
+def optimize_bound_subroutine_naive(weights,epsilon,Train_data,Gamma,hat_r_z,hat_r_y,returnDetails=0):
+    train_size,P_train,P_test = Train_data.train_size,Train_data.P_train,Train_data.P_test
+    Qw = np.diag(np.append(weights*weights,np.zeros(train_size)))
+    vw = np.append(weights*weights*P_train,np.zeros(train_size))
+    Qw_aug = np.diag(np.append(1,np.append(weights*weights,np.zeros(train_size))))
+    r0=np.append(hat_r_z,hat_r_y)
+    cons1_linear_term = np.append(0,-vw+2*Qw@r0)
+    cons1_constant = -vw@r0+r0@Qw@r0
+    bw = np.append(weights, -np.ones(train_size)/train_size)
+    obj_coef = np.append((2*math.log(1/epsilon))**0.5,bw)
+    G_inv_aug = np.zeros((train_size*2+1,train_size*2+1))
+    G_inv_aug[1:,1:]=Train_data.G_inv
+    
+    m = Model()
+    m.Params.LogToConsole = 0#suppress Gurobipy printing
+    ub_arr = np.append(np.inf,np.append(P_train,P_test)-r0)
+    lb_arr = np.append(0,-r0)
+    tdelta=m.addMVar (train_size*2+1, ub=ub_arr,lb=lb_arr,name="tdelta" )
+    m.setObjective(tdelta@obj_coef, GRB.MAXIMIZE)
+    m.addConstr(tdelta@Qw_aug@tdelta+tdelta@cons1_linear_term+cons1_constant <= 0)
+    m.addConstr(tdelta@G_inv_aug@tdelta <= Gamma**2)
+    m.params.method=1#0 is primal simplex, 1 is dual simplex, 2 is barrier
+    m.update()
+    m.optimize()
+    #print('status: ',m.status)
+    assert m.status==2 or m.status==13
+    delta=np.zeros(train_size*2)
+    for i in range(0,train_size*2):
+        delta[i]=tdelta[i+1].x
+    t = tdelta[0].x
+    assert t>0 #otherwise will have division by 0
+    qw = max(np.abs(weights)*P_train)
+    obj_val = (r0+delta)@bw+t*(2*math.log(1/epsilon))**0.5+qw*math.log(1/epsilon)/3
+    #compute grad
+    grad_3rd_term = np.zeros(train_size)
+    largest_index= np.argmax(np.abs(weights)*P_train)
+    grad_3rd_term[largest_index]=P_train[largest_index]#*sign(weights[largest_index])
+    grad_3rd_term = grad_3rd_term*math.log(1/epsilon)/3
+    grad_2nd_term= (2*math.log(1/epsilon))**0.5*0.5/t
+    r_z = hat_r_z+delta[0:train_size]
+    grad_2nd_term = grad_2nd_term*(2*weights*r_z*(P_train-r_z))
+    grad = r_z+grad_2nd_term+grad_3rd_term
+    if returnDetails==0:
+        return obj_val,grad
+    else:
+        wc_var = t**2
+        wc_bias = bw@delta
+        return obj_val,grad,wc_bias,wc_var
+
+
 def our_method(Train_data,Gamma,w0):
     #input w0 is some initial guess. output are final weights
     train_size = Train_data.train_size
