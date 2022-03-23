@@ -13,7 +13,6 @@ from sklearn.model_selection import KFold
 from scipy.stats import norm
 
 def policy_to_evaluate(x_arr,p_arr,policy_type,logging_type,rndseed):
-    #generate prices under the new policy
     if policy_type[0]=='setting1':
         multiplier=3
         p_arr=7.0+x_arr@np.array([-1,1])
@@ -35,7 +34,7 @@ def policy_to_evaluate(x_arr,p_arr,policy_type,logging_type,rndseed):
         return np.minimum(np.maximum(p_arr,0),10)*multiplier
     else:
         multiplier=3
-        p_arr=np.ones(len(p_arr))*5.0#5.0+x_arr@np.array([-1,1])
+        p_arr=np.ones(len(p_arr))*5.0+x_arr@np.array([-1,1])
         if policy_type[1]!='deterministic':
             std=1/norm.ppf(0.5+0.5*policy_type[1])#std needed for "logging_type" percentage of prices to fall in middle level 
             np.random.seed(rndseed+1836)
@@ -43,7 +42,6 @@ def policy_to_evaluate(x_arr,p_arr,policy_type,logging_type,rndseed):
         return np.minimum(np.maximum(p_arr,0),10)*multiplier
 
 def expected_demand(x_arr,p_arr,demand_type,dim):
-    #generate expected value of demand
     #assume demand type is a list, first entry is setting, second entry is smoothness parameter, third entry is jump size
     if demand_type[0]=='setting1':
         multiplier=3
@@ -67,7 +65,6 @@ def expected_demand(x_arr,p_arr,demand_type,dim):
     return d_arr
 
 def historical_policy(x_arr,logging_type,rndseed):
-    #generate price under logging policy
     #assume logging type is a list, first entry is settiing, second entry is % of prices falling withint the middle level 
     if logging_type[0]=='setting1':
         multiplier=3
@@ -87,13 +84,12 @@ def historical_policy(x_arr,logging_type,rndseed):
     else:
         multiplier=3
         std=1/norm.ppf(0.5+0.5*logging_type[1])#std needed for "logging_type" percentage of prices to fall in middle level 
-        p_arr=np.ones(x_arr.shape[0])*3.0#3+x_arr@np.array([-1,1])
+        p_arr=np.ones(x_arr.shape[0])*3+x_arr@np.array([-1,1])
         np.random.seed(rndseed+883)
         p_arr+=np.random.normal(loc=0.0,scale=std,size=len(p_arr))
         return np.minimum(np.maximum(p_arr,0),10)*multiplier
     
-def demand_levels(x_arr,p_arr,demand_type):
-    #tell us if datapoints are at lower/middle/higher demand levels (there are 5 levels of demand)
+def price_levels(x_arr,p_arr,demand_type):
     ind_very_low,ind_low,ind_med,ind_high,ind_very_high = [],[],[],[],[]
     d_arr = expected_demand(x_arr,p_arr,demand_type,2)
     height=demand_type[2]
@@ -123,11 +119,12 @@ def generate_feature(train_size,rndseed,feature_dist):
     np.random.seed(rndseed+883)
     return np.random.uniform(-1,1,(train_size,2))
     
-class prepare_data:
-    #generate a dataset,c and computes important things such as the Gram matrix. 
+class prepare_data: 
     def __init__(self,rndseed,train_size,policy_type,demand_type,logging_type,feature_dist,dim,sigma):
         X_train=generate_feature(train_size,rndseed,feature_dist)
         P_train=historical_policy(X_train,logging_type,rndseed)
+        #P_train = np.maximum(P_train,5.0)#artificially lower  bound the price
+        P_train[np.argmin(P_train)] = 0#test if we can handle this case
         P_test=policy_to_evaluate(X_train,P_train,policy_type,logging_type,rndseed)
         D_train=realized_demand(X_train,P_train,rndseed,demand_type,dim)
         
@@ -145,10 +142,9 @@ class prepare_data:
         self.D_train_simul,self.numSimulation = D_train_simul, numSimulation
         self.expected_D_train = expected_demand(X_train,P_train,demand_type,dim)
         self.expected_R_test=np.multiply(P_test,expected_demand(X_train,P_test,demand_type,dim))
-       
-class split_data:
-    #currently not used. 
-    #splits dataset into two. Half can be used for base regression. The other half can be used for doubly robust
+        self.G_inv = np.linalg.pinv(G,hermitian=True)
+        
+class split_data: 
     def __init__(self,Train_data,whichHalf,rndseed):#rndseed determines how we split data
         num_fold=2#two fold 
         assert Train_data.train_size%num_fold==0
@@ -188,7 +184,6 @@ def compute_Gram_matrix(P_train,X_train,P_test,dim,sigma):
     return G,C
 
 def preparation(G,X_train,P_train,P_test,demand_type,dim):
-    #pre-compute things that are needed for our method and for computing MSE
     train_size = len(P_train)
     rowSumHalfG=np.transpose(np.sum(G[:,train_size:],axis=1).reshape(-1,1))#sum each row of right half of G
     D3=np.transpose(rowSumHalfG).dot(rowSumHalfG)/(train_size**2)#the third term in Dw
@@ -201,38 +196,10 @@ def preparation(G,X_train,P_train,P_test,demand_type,dim):
     expected_val_test=sum(expected_R_test)/train_size
     return rowSumHalfG,D3,arr_m,expected_R_train,expected_val_test
 
+#compute true MSE, use our formula for MSE
 def true_MSE(w,Train_data):
-    #compute true MSE, use our formula for MSE
     bias=w@Train_data.expected_R_train-Train_data.expected_val_test
     temp=np.multiply(Train_data.expected_R_train,Train_data.P_train-Train_data.expected_R_train)
     variance=temp@np.multiply(w,w)
     return bias**2+variance, bias**2,variance,
-
-def rkhs_helper(x):
-    n=int(round(len(x)/2))
-    return x[0:n]@x[0:n]+x[n:2*n]@x[n:2*n]*0.1
-
-def approx_RKHS_norm_oracle(policy_type,demand_type,logging_type,feature_dist,dim,sigma):
-    #approximate the RKHS norm of the revenue function, using true revenue function
-    rndseed=197
-    train_size=100
-    X_train=generate_feature(train_size,rndseed,feature_dist)
-    P_train=historical_policy(X_train,logging_type,rndseed)
-    lb,ub=min(P_train),max(P_train)
-    P_train_norm=(P_train-lb)/ (ub-lb)    
-    Z_train=np.zeros((train_size,dim+1))
-    for i in range(0,train_size):
-        Z_train[i]=np.append(X_train[i],P_train_norm[i])
-    kernel = RBF(sigma)
-    G=kernel(Z_train)
-    r_bar=np.multiply(P_train,expected_demand(X_train,P_train,demand_type,dim))
-    #build optimization model
-    A=np.concatenate((np.identity(train_size),G),axis=1)
-    linear_constraint = LinearConstraint(A, r_bar, r_bar)#Ax=r_bar
-    res = minimize(rkhs_helper, np.ones(train_size*2), method='trust-constr', jac=False,tol=0.1,
-               constraints=[linear_constraint],options={'verbose': 0})#default maxIter=1000
-    x_star= res.x
-    c_star=x_star[train_size:2*train_size]
-    approx_rkhs_norm=c_star@G@c_star
-    return approx_rkhs_norm**0.5
 
