@@ -145,6 +145,9 @@ def nathan_log_likelihood(x,evals,v):
     return log_likelihood
 
 def bernstein_heuristics_gamma(Train_data,gamma_list,hat_r_train,hat_r_test,epsilon,remove_simplex,onlyGamma=0):
+    #heuristics choice of gamma described in section 5.3 in Vishal's write up.
+    #The "mse of estimator" approach of choosing gamma. This does not really work.
+    # #Most of the time MSE(r0) does not even reach 5% of revenue estimate. and this ratio changes a lot across datasets/bandwidth
     counter =0; bern_gamma=gamma_list[-1]; n=Train_data.train_size
     r0_mse_arr = np.zeros(len(gamma_list)); all_weights_arr = np.zeros((len(gamma_list),Train_data.train_size))
     w_bernstein = np.ones(n)/n
@@ -168,7 +171,7 @@ def bernstein_heuristics_gamma(Train_data,gamma_list,hat_r_train,hat_r_test,epsi
 
 
 def Bernstein_heuristics(Train_data,hat_r_train,s_p_arr,s_x_arr,gamma_arr):
-    #compute heuristic choice of kernel parameters s_p,s_x
+    #compute heuristic choice of kernel parameters s_p,s_x. s_p is the bandwidth for price. s_x is the bandwidth for feature
     n=Train_data.train_size
     log_likelihood_arr = np.zeros((len(s_p_arr),len(s_x_arr)))
     log_likelihood_2nd_term = np.zeros((len(s_p_arr), len(s_x_arr)))
@@ -180,33 +183,34 @@ def Bernstein_heuristics(Train_data,hat_r_train,s_p_arr,s_x_arr,gamma_arr):
             G,_ = set_up.compute_Gram_matrix(P_train,Train_data.X_train,P_train,Train_data.dim,s_p_arr[j],s_x_arr[k])
             G = G[:n,:n] #only take the training part. ignore the testing part
             G_inv = np.linalg.pinv(G, hermitian=True)
-            gamma_likelihood = np.zeros(len(gamma_arr));gamma_2nd_term = np.zeros(len(gamma_arr));
-            gamma_3rd_term = np.zeros(len(gamma_arr));gamma_rkhs = np.zeros(len(gamma_arr))
+            likelihood_vs_gamma = np.zeros(len(gamma_arr));second_term_vs_gamma = np.zeros(len(gamma_arr));
+            third_term_vs_gamma = np.zeros(len(gamma_arr));rkhs_norm_vs_gamma = np.zeros(len(gamma_arr))
             for l in range(len(gamma_arr)):
                 gamma = gamma_arr[l]
                 r_star,hess = log_posterior_density_opt(G_inv,Train_data,hat_r_train,r_star0,gamma)
                 log_likelihood = -0.5*n*np.log(2*np.pi)
                 #log_likelihood = 0 #for debugging
                 log_likelihood += -0.5*(r_star-hat_r_train)@G_inv@(r_star-hat_r_train)/(gamma**2)
-                gamma_2nd_term[l] = -0.5 * (r_star - hat_r_train) @ G_inv @ (r_star - hat_r_train) / (gamma ** 2)
+                second_term_vs_gamma[l] = -0.5 * (r_star - hat_r_train) @ G_inv @ (r_star - hat_r_train) / (gamma ** 2)
                 determinant = np.linalg.det(hess@G+np.identity(n))
-                gamma_3rd_term[l] =  -0.5 * np.log(determinant)
+                third_term_vs_gamma[l] =  -0.5 * np.log(determinant)
                 log_likelihood += -0.5*np.log(determinant)
-                gamma_rkhs[l] = (r_star-hat_r_train)@G_inv@(r_star-hat_r_train)
+                rkhs_norm_vs_gamma[l] = (r_star-hat_r_train)@G_inv@(r_star-hat_r_train)
 
                 r_star0=r_star #warm start
-                gamma_likelihood[l] = log_likelihood
-            best_gamma = np.argmax(gamma_likelihood)
-            log_likelihood_arr[j,k] = gamma_likelihood[best_gamma]
-            log_likelihood_2nd_term[j, k] = gamma_2nd_term[best_gamma]
-            log_likelihood_3rd_term[j, k] = gamma_3rd_term[best_gamma]
+                likelihood_vs_gamma[l] = log_likelihood
+            best_gamma = np.argmax(likelihood_vs_gamma)
+            log_likelihood_arr[j,k] = likelihood_vs_gamma[best_gamma]
+            log_likelihood_2nd_term[j, k] = second_term_vs_gamma[best_gamma]
+            log_likelihood_3rd_term[j, k] = third_term_vs_gamma[best_gamma]
             print('s_p ',s_p_arr[j],'s_x',s_x_arr[k],'best gamma ',gamma_arr[best_gamma],'det ',determinant,
-                  'rkhs norm ',gamma_rkhs[best_gamma])
+                  'rkhs norm ',rkhs_norm_vs_gamma[best_gamma])
 
     opt_s_p,opt_s_x = bernstein_find_opt_params_from_likelihood(log_likelihood_arr,s_p_arr,s_x_arr)
     return opt_s_p,opt_s_x,log_likelihood_arr, log_likelihood_2nd_term,log_likelihood_3rd_term
 
 def bernstein_find_opt_params_from_likelihood(log_likelihood_arr,s_p_arr,s_x_arr):
+    #choose the smallest bandwidth such that log likelihood is no more than 0.5% away from optimal log likelihood
     opt_log_likelihood = np.max(log_likelihood_arr); counter=0;opt_s_p_ind=0; opt_s_p=0; opt_s_x=0
     for i in range(len(s_p_arr)):
         if max(log_likelihood_arr[i])> 1.001*opt_log_likelihood and counter==0:
@@ -225,14 +229,16 @@ def log_posterior_density_opt(G_inv,Train_data,hat_r_train,r_star0,gamma):
     P_train = Train_data.P_train
     if r_star0==[]:
         r_star0=P_train/2
-    bounds = Bounds([0.1]*len(P_train), P_train-0.1,keep_feasible=True) #avoid division by zero in hessian
+    #bound constraints are needed to avoid division by zero in hessian (results in crazy large hessian or numerical issues in solver)
+    bounds = Bounds([0.1]*len(P_train), P_train-0.1,keep_feasible=True)
+    #scipy only has 'minimize'. So I negate the objective function to do maximization
     res = minimize(log_posterior_density_obj_grad, r_star0,args=(R_train,P_train,G_inv,gamma,hat_r_train)
                    , method='trust-constr',jac=True,hess=log_posterior_density_hess,
                     tol=1e-4,options={'verbose':0}, bounds=bounds)
     r_star = res.x; opt_obj = res.fun
     diagonals =np.divide(R_train,P_train*r_star*r_star)\
                +np.divide(P_train-R_train,P_train*(P_train-r_star)*(P_train-r_star))
-    if min(diagonals)<0:
+    if min(diagonals)<0: #sanity check
         print('H has negative values ',diagonals)
     assert min(diagonals) > 0
     hess = np.diag(diagonals)#hessian of the marginal likelihood, not hessian of the log posterior
@@ -245,12 +251,14 @@ def log_posterior_density_obj_grad(r_star,R_train,P_train,G_inv,gamma,hat_r_trai
             - 0.5*(r_star-hat_r_train)@G_inv@(r_star-hat_r_train)/(gamma**2)
     grad = np.divide(R_train,P_train*r_star)-np.divide(1-R_train_ratio,P_train-r_star)\
            -G_inv@(r_star-hat_r_train)/(gamma**2)
-    return -obj,-grad #want to maximize, but scipy is doing minimization
+    # scipy only has 'minimize'. So I negate the objective function to do maximization
+    return -obj,-grad
 
 def log_posterior_density_hess(r_star,R_train,P_train,G_inv,gamma,hat_r_train):
     diagonals =np.divide(R_train,P_train*r_star*r_star)\
                +np.divide(P_train-R_train,P_train*(P_train-r_star)*(P_train-r_star))
     hess = -np.diag(diagonals)-G_inv/(gamma**2)
+    # scipy only has 'minimize'. So I negate the objective function to do maximization
     return -hess
 
 
