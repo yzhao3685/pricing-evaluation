@@ -65,7 +65,7 @@ def min_mse_gamma(Train_data,hat_r_train,hat_r_test,gamma_list,remove_simplex=1)
     w_ours = [1 / train_size] * train_size
     hat_r_train, hat_r_test = truncate_r(Train_data,hat_r_train,hat_r_test) #else will cause negative variance issues
     for i in range(n_gamma):
-        w,wc_mse = our_method_DR(Train_data,gamma_list[i],w_ours,hat_r_train, hat_r_test,remove_simplex)
+        w,wc_mse = min_mse_method(Train_data,gamma_list[i],w_ours,hat_r_train, hat_r_test,remove_simplex)
         mse_arr[i],biasSq,var,estimate = set_up.true_MSE(w,Train_data)
         print('gamma: ',gamma_list[i],' true mse: ',mse_arr[i],'weights: ',w)
         if mse_arr[i] < opt_mse:
@@ -170,8 +170,10 @@ def bernstein_heuristics_gamma(Train_data,gamma_list,hat_r_train,hat_r_test,epsi
     return bern_gamma,r0_mse_arr,all_weights_arr
 
 
-def Bernstein_heuristics(Train_data,hat_r_train,s_p_arr,s_x_arr,gamma_arr):
+def Bernstein_heuristics(Train_data,hat_r_train,s_p_arr,s_x_arr,gamma_arr=[]):
     #compute heuristic choice of kernel parameters s_p,s_x. s_p is the bandwidth for price. s_x is the bandwidth for feature
+    if gamma_arr==[]:
+        gamma_arr = np.ones(1)
     n=Train_data.train_size
     log_likelihood_arr = np.zeros((len(s_p_arr),len(s_x_arr)))
     log_likelihood_2nd_term = np.zeros((len(s_p_arr), len(s_x_arr)))
@@ -245,6 +247,7 @@ def log_posterior_density_opt(G_inv,Train_data,hat_r_train,r_star0,gamma):
     return r_star,hess
 
 def log_posterior_density_obj_grad(r_star,R_train,P_train,G_inv,gamma,hat_r_train):
+    #helper function for bernstein method heuristics bandwidth
     R_train_ratio = np.divide(R_train,P_train)
     r_star_ratio = np.divide(r_star,P_train)
     obj = R_train_ratio@np.log(r_star_ratio)+(1-R_train_ratio)@np.log(1-r_star_ratio)\
@@ -255,6 +258,7 @@ def log_posterior_density_obj_grad(r_star,R_train,P_train,G_inv,gamma,hat_r_trai
     return -obj,-grad
 
 def log_posterior_density_hess(r_star,R_train,P_train,G_inv,gamma,hat_r_train):
+    #helper function for bernstein method heuristics bandwidth
     diagonals =np.divide(R_train,P_train*r_star*r_star)\
                +np.divide(P_train-R_train,P_train*(P_train-r_star)*(P_train-r_star))
     hess = -np.diag(diagonals)-G_inv/(gamma**2)
@@ -263,7 +267,7 @@ def log_posterior_density_hess(r_star,R_train,P_train,G_inv,gamma,hat_r_train):
 
 
 
-def optimize_bound_method(Train_data,Gamma,w0,hat_r_train,hat_r_test,epsilon=0.05,remove_simplex=1,verbose=0):
+def bernstein_method(Train_data,Gamma,w0,hat_r_train,hat_r_test,epsilon=0.05,remove_simplex=1,verbose=0):
     train_size = Train_data.train_size
     hat_r_train, hat_r_test = truncate_r(Train_data,hat_r_train,hat_r_test)
     if w0==[]:
@@ -274,11 +278,11 @@ def optimize_bound_method(Train_data,Gamma,w0,hat_r_train,hat_r_test,epsilon=0.0
     linear_constraint = LinearConstraint([1]*train_size, [1], [1])
     bounds = Bounds([0.0]*train_size, [100.0]*train_size)
     if remove_simplex==0:
-        res = minimize(optimize_bound_subroutine, w_ours,args=(sub_data,Train_data,1), method='trust-constr',
+        res = minimize(bernstein_subroutine, w_ours,args=(sub_data,Train_data,1), method='trust-constr',
                     jac=True,tol=0.000002,constraints=[linear_constraint],options={'verbose':verbose}, bounds=bounds)#default maxIter=1000
         w_ours = res.x
     else:
-        res = minimize(optimize_bound_subroutine, w_ours,args=(sub_data,Train_data,1), method='trust-constr',
+        res = minimize(bernstein_subroutine, w_ours,args=(sub_data,Train_data,1), method='trust-constr',
                     jac=True,tol=0.000002,options={'verbose':verbose})#default maxIter=1000
         w_ours = res.x
     return w_ours #record_arr[1:,:]
@@ -290,7 +294,7 @@ class prepare_subproblem_data:
         self.epsilon=epsilon;self.Gamma=Gamma;self.hat_r_train=hat_r_train;self.hat_r_test=hat_r_test
         self.r0=np.append(hat_r_train,hat_r_test)
 
-def optimize_bound_subroutine(weights,sub_data,Train_data,keep_record=0,returnDetails=0):
+def bernstein_subroutine(weights,sub_data,Train_data,keep_record=0,returnDetails=0):
     train_size,P_train,P_test,G_inv = Train_data.train_size,Train_data.P_train,Train_data.P_test,Train_data.G_inv
     epsilon=sub_data.epsilon;Gamma=sub_data.Gamma;r0=sub_data.r0
     bw = np.append(weights, -np.ones(train_size)/train_size)
@@ -340,7 +344,7 @@ def optimize_bound_subroutine(weights,sub_data,Train_data,keep_record=0,returnDe
         #    print('iterate: ',record_arr.shape[0]-1,'objective: ',np.round(obj_val,4))
     return obj_val,grad
 
-def optimize_bound_method_oracle(Train_data,w0,epsilon=0.05,remove_simplex=1,verbose=0):
+def oracle_bernstein_method(Train_data,w0,epsilon=0.05,remove_simplex=1,verbose=0):
     train_size = Train_data.train_size
     hat_r_train, hat_r_test = truncate_r(Train_data,Train_data.expected_R_train,Train_data.expected_R_test)
     if w0==[]:
@@ -351,16 +355,16 @@ def optimize_bound_method_oracle(Train_data,w0,epsilon=0.05,remove_simplex=1,ver
     linear_constraint = LinearConstraint([1]*train_size, [1], [1])
     bounds = Bounds([0.0]*train_size, [100.0]*train_size)
     if remove_simplex==0:
-        res = minimize(optimize_bound_subroutine_oracle, w_ours,args=(sub_data,Train_data,1), method='trust-constr',
+        res = minimize(oracle_bernstein_method_subroutine, w_ours,args=(sub_data,Train_data,1), method='trust-constr',
                     jac=True,tol=0.0002,constraints=[linear_constraint],options={'verbose':verbose}, bounds=bounds)#default maxIter=1000
         w_ours = res.x
     else:
-        res = minimize(optimize_bound_subroutine_oracle, w_ours,args=(sub_data,Train_data,1), method='trust-constr',
+        res = minimize(oracle_bernstein_method_subroutine, w_ours,args=(sub_data,Train_data,1), method='trust-constr',
                     jac=True,tol=0.0002,options={'verbose':verbose})#default maxIter=1000
         w_ours = res.x
     return w_ours #record_arr[1:,:]
 
-def optimize_bound_subroutine_oracle(weights,sub_data,Train_data,keep_record=0,returnDetails=0):
+def oracle_bernstein_method_subroutine(weights,sub_data,Train_data,keep_record=0,returnDetails=0):
     train_size,P_train,P_test = Train_data.train_size,Train_data.P_train,Train_data.P_test
     r=np.append(Train_data.expected_R_train,Train_data.expected_R_test)
     bw = np.append(weights, -np.ones(train_size) / train_size)
@@ -397,7 +401,7 @@ def truncate_r(Train_data,r_train,r_test):
     return r_train1,r_test1
 
 
-def subroutine_DR_nonconvex(weights,Gamma,Train_data,hat_r_train, hat_r_test,returnDetails):#without diagonalization
+def min_mse_method_subroutine(weights,Gamma,Train_data,hat_r_train, hat_r_test,returnDetails):#without diagonalization
     G,C,rowSumHalfG = Train_data.G,Train_data.C,Train_data.rowSumHalfG
     D3,arr_m,train_size = Train_data.D3,Train_data.arr_m,Train_data.train_size
     #compute D(w)
@@ -455,7 +459,7 @@ def subroutine_DR_nonconvex(weights,Gamma,Train_data,hat_r_train, hat_r_test,ret
         return obj_val,worst_bias**2,worst_var
 
 
-def our_method_DR(Train_data,Gamma,w0,hat_r_train, hat_r_test,remove_simplex=1):
+def min_mse_method(Train_data,Gamma,w0,hat_r_train, hat_r_test,remove_simplex=1):
     hat_r_train,hat_r_test = truncate_r(Train_data,hat_r_train,hat_r_test)
     train_size = Train_data.train_size
     if w0==[]:
@@ -463,7 +467,7 @@ def our_method_DR(Train_data,Gamma,w0,hat_r_train, hat_r_test,remove_simplex=1):
     linear_constraint = LinearConstraint([1]*train_size, [1], [1])#weights sum to 1
     bounds = Bounds([0.0]*train_size, [100.0]*train_size)#default maxIter=1000
     tolerance=0.01
-    fun=subroutine_DR_nonconvex
+    fun=min_mse_method_subroutine
     res=[]
     if remove_simplex==0:
         res = minimize(fun, w0,args=(Gamma,Train_data,hat_r_train, hat_r_test,0),
@@ -475,7 +479,7 @@ def our_method_DR(Train_data,Gamma,w0,hat_r_train, hat_r_test,remove_simplex=1):
     #print('sum weights: ',sum(weights))
     return weights,wc_mse
 
-def subroutine_DR_nonconvex_oracle(weights,Train_data,returnDetails=0):
+def min_mse_method_subroutine_oracle(weights,Train_data,returnDetails=0):
     #use true revenue, instead of w.c. revenue
     train_size = Train_data.train_size
     r_train=Train_data.expected_R_train
@@ -488,14 +492,14 @@ def subroutine_DR_nonconvex_oracle(weights,Train_data,returnDetails=0):
     #if returnDetails==0:
     return obj_val, grad
 
-def our_method_DR_oracle(Train_data,w0,remove_simplex=1):
+def min_mse_method_oracle(Train_data,w0,remove_simplex=1):
     train_size = Train_data.train_size
     if w0==[]:
         w0=np.ones(train_size)/train_size
     linear_constraint = LinearConstraint([1]*train_size, [1], [1])#weights sum to 1
     bounds = Bounds([0.0]*train_size, [100.0]*train_size)#default maxIter=1000
     tolerance=0.01
-    fun=subroutine_DR_nonconvex_oracle
+    fun=min_mse_method_subroutine_oracle
     res=[]
     if remove_simplex==0:
         res = minimize(fun, w0,args=(Train_data,0),
@@ -508,7 +512,7 @@ def our_method_DR_oracle(Train_data,w0,remove_simplex=1):
     return weights
 
 
-def nathans_subroutine_DR_nonconvex(weights,Gamma,sigma,Train_data,r0):
+def nathan_method_DR_subroutine(weights,Gamma,sigma,Train_data,r0):
     train_size = Train_data.train_size; G_inv = Train_data.G_inv
     bw = np.append(weights, -np.ones(train_size)/train_size)
     obj_quad_term = np.outer(bw,bw)
@@ -564,7 +568,7 @@ def nathans_method_DR(Train_data,Gamma,sigma,w0,hat_r_train, hat_r_test,remove_s
     assert min(r0)>0
     if w0==[]:
         w0=np.ones(train_size)/train_size
-    tolerance=0.01; fun=nathans_subroutine_DR_nonconvex ; res=[]
+    tolerance=0.01; fun=nathan_method_DR_subroutine ; res=[]
     if remove_simplex==1:
         res = minimize(fun, w0,args=(Gamma,sigma,Train_data,r0),
                        method='trust-constr', jac=True,tol=tolerance,options={'verbose': 0})
